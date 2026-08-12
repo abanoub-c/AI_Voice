@@ -1,28 +1,11 @@
-"""
-Voice AI agent — the "John" stack.
-
-STT:       Deepgram (nova-3, streaming)
-LLM:       Groq (Llama 3.3 70B) — fast + cheap. Swap to OpenAI/Anthropic any time,
-           see the comment on the `llm =` line below.
-TTS:       Cartesia (Sonic-2) — sub-200ms time-to-first-audio.
-Transport: Daily (WebRTC) for local/browser testing. Swap to Twilio/Vonage for
-           real inbound/outbound phone calls (see README "Going to a real phone
-           number" section).
-VAD:       Silero, wired into the user context aggregator below. This is what
-           gives you instant barge-in — the caller can cut the bot off mid-
-           sentence — instead of "Alex"'s press-to-talk, wait-for-silence
-           behavior.
-
-Run it:
-    uv sync
-    uv run bot.py
-Then open http://localhost:7860/client and click Connect.
-"""
-
 import os
-
+import asyncio
 from dotenv import load_dotenv
 from loguru import logger
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
@@ -33,27 +16,34 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
-from pipecat.runner.types import RunnerArguments
-from pipecat.runner.utils import create_transport
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.groq.llm import GroqLLMService
+from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
 from pipecat.transports.base_transport import TransportParams
-from pipecat.transports.daily.transport import DailyParams
-from pipecat.workers.runner import WorkerRunner
 
-from fastapi import FastAPI
-app = FastAPI()
 load_dotenv(override=True)
+
+# Initialize FastAPI
+app = FastAPI()
+
 # ---------------------------------------------------------------------------
-# 1. KNOWLEDGE BASE — paste your actual FAQ / help-doc / policy text here.
-#    For a v1 built in an afternoon, dropping the raw text straight into the
-#    prompt is faster and more reliable than standing up a RAG pipeline, and
-#    Llama 3.3 70B's context window comfortably holds a full FAQ page or two.
-#    Swap to real retrieval only once this grows past a few thousand words.
+# 1. CORS CONFIGURATION
 # ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://f379fecc-08b1-4f6a-8f94-525339570e46.lovableproject.com",
+        "https://id-preview--f379fecc-08b1-4f6a-8f94-525339570e46.lovable.app",
+        "*"  # Allows all origins for testing
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ---------------------------------------------------------------------------
-# 1. KNOWLEDGE BASE — Your Marketing & Technical Portfolio
+# 2. KNOWLEDGE BASE
 # ---------------------------------------------------------------------------
 KNOWLEDGE_BASE = """
 Q: Who are you and who do you represent?
@@ -79,7 +69,7 @@ A: Just give me a brief description of your problem or KPI today. Abanoub will f
 """
 
 # ---------------------------------------------------------------------------
-# 2. THE AGENT'S BRAIN — The Sales Engineer Persona
+# 3. SYSTEM PROMPT
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = f"""You are a sharp, respectful, and dryly witty AI sales engineer representing Abanoub (pronounced Ah-bah-noob), a freelance data scientist. 
 
@@ -100,31 +90,24 @@ Rules for the conversation:
 - If they are ready to move forward, politely offer to grab their contact details so Abanoub can send a proposal.
 """
 
-async def run_bot(transport, runner_args: RunnerArguments):
+# ---------------------------------------------------------------------------
+# 4. PIPECAT PIPELINE RUNNER
+# ---------------------------------------------------------------------------
+async def run_bot(transport):
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         settings=DeepgramSTTService.Settings(
-        model="nova-3-general",  # Deepgram's most advanced model with the lowest Word Error Rate
-        punctuate=True,
-        smart_format=True,
+            model="nova-3-general",
+            punctuate=True,
+            smart_format=True,
+        )
     )
-)
 
     tts = DeepgramTTSService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        voice="aura-asteria-en" # A highly natural, professional female voice
+        voice="aura-asteria-en"
     )
-    # tts = CartesiaTTSService(
-    #     api_key=os.getenv("CARTESIA_API_KEY"),
-    #     voice_id=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
-    #     model=os.getenv("CARTESIA_MODEL", "sonic-2"),
-    # )
 
-    # Groq gives you the lowest LLM-side latency and the lowest per-token cost,
-    # which is most of what separates "John" from "Alex" on the bill.
-    # To use OpenAI instead (better reasoning, a bit slower/pricier):
-    #   from pipecat.services.openai.llm import OpenAILLMService
-    #   llm = OpenAILLMService(api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4o-mini")
     llm = GroqLLMService(
         api_key=os.getenv("GROQ_API_KEY"),
         model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
@@ -133,21 +116,18 @@ async def run_bot(transport, runner_args: RunnerArguments):
     context = LLMContext([{"role": "system", "content": SYSTEM_PROMPT}])
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        # vad_analyzer here is the whole barge-in story: it detects the caller
-        # starting to speak and interrupts the bot instantly instead of
-        # waiting for it to finish talking.
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
     pipeline = Pipeline(
         [
-            transport.input(),  # audio in from the caller
-            stt,  # speech -> text
-            user_aggregator,  # add the caller's turn to conversation history
-            llm,  # text -> reply
-            tts,  # reply -> speech
-            transport.output(),  # audio out to the caller
-            assistant_aggregator,  # add the bot's turn to conversation history
+            transport.input(),
+            stt,
+            user_aggregator,
+            llm,
+            tts,
+            transport.output(),
+            assistant_aggregator,
         ]
     )
 
@@ -179,18 +159,28 @@ async def run_bot(transport, runner_args: RunnerArguments):
     await runner.add_workers(worker)
     await runner.run()
 
+# ---------------------------------------------------------------------------
+# 5. WEBRTC OFFER ENDPOINT
+# ---------------------------------------------------------------------------
+@app.post("/api/offer")
+async def offer(request: Request):
+    offer_data = await request.json()
+    transport = SmallWebRTCTransport(
+        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True)
+    )
+    asyncio.create_task(run_bot(transport))
+    answer = await transport.handle_offer(offer_data)
+    return JSONResponse(content=answer)
 
-async def bot(runner_args: RunnerArguments):
-    """Entry point Pipecat's runner calls — native WebRTC without Daily."""
-    transport_params = {
-        "webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True),
-    }
-    transport = await create_transport(runner_args, transport_params)
-    await run_bot(transport, runner_args)
+# Health check endpoint for Render
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "Voice AI Agent"}
 
+# ---------------------------------------------------------------------------
+# 6. APP ENTRYPOINT
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    from pipecat.runner.run import main
     import uvicorn
     port = int(os.environ.get("PORT", 7860))
-    uvicorn.run("bot:app", host="0.0.0.0", port=port, reload=False)
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=port)
