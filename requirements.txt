@@ -3,3 +3,4 @@ loguru
 pipecat-ai[daily,deepgram,cartesia,groq,silero]
 fastapi
 uvicorn
+pipecat.transports.network.small_webrtc
