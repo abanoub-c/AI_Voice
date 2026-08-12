@@ -19,7 +19,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.groq.llm import GroqLLMService
-from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
+from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
 from pipecat.transports.base_transport import TransportParams
 
 load_dotenv(override=True)
