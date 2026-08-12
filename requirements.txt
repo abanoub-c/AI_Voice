@@ -2,3 +2,4 @@ python-dotenv
 loguru
 pipecat-ai[daily,deepgram,cartesia,groq,silero]
 fastapi
+uvicorn
