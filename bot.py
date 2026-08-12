@@ -42,6 +42,8 @@ from pipecat.transports.base_transport import TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.workers.runner import WorkerRunner
 
+from fastapi import FastAPI
+app = FastAPI()
 load_dotenv(override=True)
 # ---------------------------------------------------------------------------
 # 1. KNOWLEDGE BASE — paste your actual FAQ / help-doc / policy text here.
