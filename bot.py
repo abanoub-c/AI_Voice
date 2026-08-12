@@ -19,9 +19,16 @@ from pipecat.processors.aggregators.llm_response_universal import (
 from pipecat.services.deepgram.tts import DeepgramTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.groq.llm import GroqLLMService
-from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
 from pipecat.transports.base_transport import TransportParams
 
+try:
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+except ModuleNotFoundError:
+    try:
+        from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
+    except ModuleNotFoundError:
+        from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
+        
 load_dotenv(override=True)
 
 # Initialize FastAPI
