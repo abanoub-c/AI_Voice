@@ -22,12 +22,12 @@ from pipecat.services.groq.llm import GroqLLMService
 from pipecat.transports.base_transport import TransportParams
 
 try:
-    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport, SmallWebRTCConnection
 except ModuleNotFoundError:
     try:
-        from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
+        from pipecat.transports.network.small_webrtc import SmallWebRTCTransport, SmallWebRTCConnection
     except ModuleNotFoundError:
-        from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
+        from pipecat.transports.services.small_webrtc import SmallWebRTCTransport, SmallWebRTCConnection
         
 load_dotenv(override=True)
 
@@ -172,17 +172,32 @@ async def run_bot(transport):
 @app.post("/api/offer")
 async def offer(request: Request):
     offer_data = await request.json()
+
+    # 1. Instantiate the WebRTC connection object
+    webrtc_connection = SmallWebRTCConnection()
+
+    # 2. Pass webrtc_connection to SmallWebRTCTransport
     transport = SmallWebRTCTransport(
+        webrtc_connection=webrtc_connection,
         params=TransportParams(audio_in_enabled=True, audio_out_enabled=True)
     )
-    asyncio.create_task(run_bot(transport))
-    answer = await transport.handle_offer(offer_data)
-    return JSONResponse(content=answer)
 
-# Health check endpoint for Render
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "service": "Voice AI Agent"}
+    # 3. Launch the bot pipeline asynchronously
+    asyncio.create_task(run_bot(transport))
+
+    # 4. Handle the SDP offer exchange
+    try:
+        answer = await webrtc_connection.handle_offer(
+            offer_data.get("sdp"), 
+            offer_data.get("type", "offer")
+        )
+    except TypeError:
+        answer = await webrtc_connection.handle_offer(offer_data)
+
+    # Format the response back to Lovable
+    if hasattr(answer, "sdp") and hasattr(answer, "type"):
+        return JSONResponse(content={"sdp": answer.sdp, "type": answer.type})
+    return JSONResponse(content=answer)
 
 # ---------------------------------------------------------------------------
 # 6. APP ENTRYPOINT
