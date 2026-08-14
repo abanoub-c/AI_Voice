@@ -22,18 +22,29 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.services.groq.llm import GroqLLMService
 from pipecat.transports.base_transport import TransportParams
 
+# --- PIPECAT WEBRTC IMPORTS ---
+from pipecat.transports.smallwebrtc.request_handler import (
+    SmallWebRTCPatchRequest,
+    SmallWebRTCRequest,
+    SmallWebRTCRequestHandler,
+    IceCandidate
+)
+
 try:
-    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport, SmallWebRTCConnection
+    from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 except ModuleNotFoundError:
     try:
-        from pipecat.transports.network.small_webrtc import SmallWebRTCTransport, SmallWebRTCConnection
+        from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
     except ModuleNotFoundError:
-        from pipecat.transports.services.small_webrtc import SmallWebRTCTransport, SmallWebRTCConnection
+        from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
         
 load_dotenv(override=True)
 
 # Initialize FastAPI
 app = FastAPI()
+
+# Initialize the Pipecat handler that seamlessly manages peer connections
+webrtc_request_handler = SmallWebRTCRequestHandler()
 
 # ---------------------------------------------------------------------------
 # 1. CORS CONFIGURATION
@@ -111,14 +122,20 @@ async def run_bot(transport):
         )
     )
 
+    # Fixed: Updated to use the Settings object
     tts = DeepgramTTSService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
-        voice="aura-asteria-en"
+        settings=DeepgramTTSService.Settings(
+            voice="aura-asteria-en"
+        )
     )
 
+    # Fixed: Updated to use the Settings object
     llm = GroqLLMService(
         api_key=os.getenv("GROQ_API_KEY"),
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        settings=GroqLLMService.Settings(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        )
     )
 
     context = LLMContext([{"role": "system", "content": SYSTEM_PROMPT}])
@@ -168,37 +185,58 @@ async def run_bot(transport):
     await runner.run()
 
 # ---------------------------------------------------------------------------
-# 5. WEBRTC OFFER ENDPOINT
+# 5. WEBRTC ENDPOINTS
 # ---------------------------------------------------------------------------
+
+# POST route for the initial WebRTC Offer
 @app.post("/api/offer")
-async def offer(request: Request):
+async def post_offer(request: Request):
     offer_data = await request.json()
-
-    # 1. Instantiate the WebRTC connection object
-    webrtc_connection = SmallWebRTCConnection()
-
-    # 2. Pass webrtc_connection to SmallWebRTCTransport
-    transport = SmallWebRTCTransport(
-        webrtc_connection=webrtc_connection,
-        params=TransportParams(audio_in_enabled=True, audio_out_enabled=True)
-    )
-
-    # 3. Launch the bot pipeline asynchronously
-    asyncio.create_task(run_bot(transport))
-
-    # 4. Handle the SDP offer exchange
-    try:
-        answer = await webrtc_connection.handle_offer(
-            offer_data.get("sdp"), 
-            offer_data.get("type", "offer")
+    
+    # 1. Parse incoming data into Pipecat's required format
+    webrtc_request = SmallWebRTCRequest.from_dict(offer_data)
+    
+    # 2. Define the callback that launches your bot when connection is established
+    async def webrtc_callback(webrtc_connection):
+        transport = SmallWebRTCTransport(
+            webrtc_connection=webrtc_connection,
+            params=TransportParams(audio_in_enabled=True, audio_out_enabled=True)
         )
-    except TypeError:
-        answer = await webrtc_connection.handle_offer(offer_data)
+        # Launch the bot pipeline asynchronously
+        asyncio.create_task(run_bot(transport))
 
-    # Format the response back to Lovable
-    if hasattr(answer, "sdp") and hasattr(answer, "type"):
-        return JSONResponse(content={"sdp": answer.sdp, "type": answer.type})
-    return JSONResponse(content=answer)
+    # 3. Pipecat's handler dynamically creates the connection, triggers the bot callback, and returns the SDP answer
+    response_data = await webrtc_request_handler.handle_web_request(
+        request=webrtc_request,
+        webrtc_connection_callback=webrtc_callback
+    )
+    
+    # Send the generated SDP answer back to the Lovable UI
+    return JSONResponse(content=response_data)
+
+# PATCH route for Trickle ICE Candidates (Fixes your 405 Error)
+@app.patch("/api/offer")
+async def patch_offer(request: Request):
+    patch_data = await request.json()
+    
+    # Parse the incoming ICE candidates
+    pc_id = patch_data.get("pc_id")
+    candidates_data = patch_data.get("candidates", [])
+    
+    # Transform incoming JSON fields to Pipecat's IceCandidate objects
+    candidates = [
+        IceCandidate(
+            candidate=c.get("candidate", ""),
+            sdp_mid=c.get("sdpMid", c.get("sdp_mid", "")),
+            sdp_mline_index=int(c.get("sdpMLineIndex", c.get("sdp_mline_index", 0)))
+        ) for c in candidates_data
+    ]
+    
+    # Reconstruct the patch request and hand it to Pipecat
+    patch_request = SmallWebRTCPatchRequest(pc_id=pc_id, candidates=candidates)
+    await webrtc_request_handler.handle_patch_request(patch_request)
+    
+    return JSONResponse(content={"status": "patched successfully"})
 
 # ---------------------------------------------------------------------------
 # 6. APP ENTRYPOINT
