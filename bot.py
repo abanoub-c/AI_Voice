@@ -37,7 +37,11 @@ except ModuleNotFoundError:
         from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
     except ModuleNotFoundError:
         from pipecat.transports.services.small_webrtc import SmallWebRTCTransport
-        
+
+import asyncio
+from webrtc_stability_patches import apply_aioice_patches, install_stun_retry_exception_filter
+apply_aioice_patches()
+
 load_dotenv(override=True)
 
 # Initialize FastAPI
